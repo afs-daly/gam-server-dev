@@ -1,0 +1,72 @@
+name: Docker Multi-Arch Build
+
+on:
+  push:
+    branches: [ "main" ]
+    tags: [ 'v*.*.*' ]  # build when you push a release tag
+  pull_request:
+    branches: [ "main" ]
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  build-multiarch:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log into registry ${{ env.REGISTRY }}
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Generate tags:
+      # - on main: :main (no latest here, see flavor=latest=false)
+      # - on vX.Y.Z tags: :vX.Y.Z, :vX.Y, :vX and (optionally) :latest
+      - name: Extract Docker metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          flavor: |
+            latest=false
+          tags: |
+            # tag event → semver tags
+            type=ref,event=tag
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}}
+            # branch/SHA tags (for main/PRs)
+            type=ref,event=branch
+            type=sha
+
+      - name: Build and push multi-arch Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: ${{ github.event_name != 'pull_request' }}
+          platforms: linux/amd64,linux/arm64
+          # Always push the meta-generated tags.
+          # Also push :latest only on semver tag builds (release).
+          tags: |
+            ${{ steps.meta.outputs.tags }}
+            ${{ github.ref_type == 'tag' && startsWith(github.ref_name, 'v') && format('{0}/{1}:latest', env.REGISTRY, env.IMAGE_NAME) || '' }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
